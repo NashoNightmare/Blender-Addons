@@ -13,7 +13,7 @@ import os
 import shutil
 import pathlib
 import mathutils
-
+import bmesh
 # =========================================================================
 # HELPER FUNCTIONS
 # =========================================================================
@@ -29,7 +29,6 @@ def get_preferences(context):
         return context.preferences.addons[filename].preferences
         
     return None
-
 
 def create_lattice_for_object(obj, interpolation_u, interpolation_v, interpolation_w, res_u, res_v, res_w):
     """Creates a lattice matching the object's local bounding box exactly and adds a Lattice modifier."""
@@ -79,7 +78,6 @@ def create_lattice_for_object(obj, interpolation_u, interpolation_v, interpolati
     mod.object = lat_obj
     
     return lat_obj
-
 
 def get_uv_islands(bm, uv_layer):
     """Finds all UV islands in the BMesh and returns them as a list of lists of loops."""
@@ -144,7 +142,6 @@ def get_uv_islands(bm, uv_layer):
 
     return list(islands.values())
 
-
 # =========================================================================
 # FUTURE OPERATORS GO HERE
 # =========================================================================
@@ -165,12 +162,11 @@ def get_uv_islands(bm, uv_layer):
 #         self.report({'INFO'}, "Operator Executed Successfully!")
 #         return {'FINISHED'}
 
-
 # =========================================================================
 # UV TOOLS OPERATORS
 # =========================================================================
 class NASH3D_OT_snap_to_coordinate(bpy.types.Operator):
-    """Rotate the selected UV island by 90-degree increments to place the selected vertex at the bottom-left, then move it to the target coordinates"""
+    """Move the selected UV island to place the selected vertex at the target coordinates"""
     bl_idname = "nash3d.snap_to_coordinate"
     bl_label = "Snap to coordinate"
     bl_options = {'REGISTER', 'UNDO'}
@@ -216,68 +212,24 @@ class NASH3D_OT_snap_to_coordinate(bpy.types.Operator):
             u_sel = ref_loop[uv_layer].uv.x
             v_sel = ref_loop[uv_layer].uv.y
             
-            # Find the best rotation angle out of 0, 90, 180, 270 degrees
-            best_angle = 0
-            min_dist_sq = float('inf')
+            # Calculate translation needed to move the selected vertex to the target coordinates
+            translation_u = self.target_u - u_sel
+            translation_v = self.target_v - v_sel
             
-            # 0 degrees
-            min_u_0 = min(l[uv_layer].uv.x for l in island)
-            min_v_0 = min(l[uv_layer].uv.y for l in island)
-            d0 = (u_sel - min_u_0)**2 + (v_sel - min_v_0)**2
-            if d0 < min_dist_sq:
-                min_dist_sq = d0
-                best_angle = 0
-                
-            # 90 degrees CCW (rotated around u_sel, v_sel)
-            min_u_90 = min(u_sel - (l[uv_layer].uv.y - v_sel) for l in island)
-            min_v_90 = min(v_sel + (l[uv_layer].uv.x - u_sel) for l in island)
-            d90 = (u_sel - min_u_90)**2 + (v_sel - min_v_90)**2
-            if d90 < min_dist_sq:
-                min_dist_sq = d90
-                best_angle = 90
-                
-            # 180 degrees
-            min_u_180 = min(u_sel - (l[uv_layer].uv.x - u_sel) for l in island)
-            min_v_180 = min(v_sel - (l[uv_layer].uv.y - v_sel) for l in island)
-            d180 = (u_sel - min_u_180)**2 + (v_sel - min_v_180)**2
-            if d180 < min_dist_sq:
-                min_dist_sq = d180
-                best_angle = 180
-                
-            # 270 degrees CCW
-            min_u_270 = min(u_sel + (l[uv_layer].uv.y - v_sel) for l in island)
-            min_v_270 = min(v_sel - (l[uv_layer].uv.x - u_sel) for l in island)
-            d270 = (u_sel - min_u_270)**2 + (v_sel - min_v_270)**2
-            if d270 < min_dist_sq:
-                min_dist_sq = d270
-                best_angle = 270
-                
-            # Apply the best rotation and translation directly to loops using target coordinates
+            # Apply the translation directly to loops
             for l in island:
-                u, v = l[uv_layer].uv.x, l[uv_layer].uv.y
-                if best_angle == 0:
-                    l[uv_layer].uv.x = u - u_sel + self.target_u
-                    l[uv_layer].uv.y = v - v_sel + self.target_v
-                elif best_angle == 90:
-                    l[uv_layer].uv.x = v_sel - v + self.target_u
-                    l[uv_layer].uv.y = u - u_sel + self.target_v
-                elif best_angle == 180:
-                    l[uv_layer].uv.x = u_sel - u + self.target_u
-                    l[uv_layer].uv.y = v_sel - v + self.target_v
-                elif best_angle == 270:
-                    l[uv_layer].uv.x = v - v_sel + self.target_u
-                    l[uv_layer].uv.y = u_sel - u + self.target_v
+                l[uv_layer].uv.x += translation_u
+                l[uv_layer].uv.y += translation_v
                     
             processed_count += 1
             
         if processed_count > 0:
             bmesh.update_edit_mesh(obj.data)
-            self.report({'INFO'}, f"Aligned and snapped {processed_count} island(s) to ({self.target_u:.2f}, {self.target_v:.2f}).")
+            self.report({'INFO'}, f"Snapped {processed_count} island(s) to ({self.target_u:.2f}, {self.target_v:.2f}).")
             return {'FINISHED'}
         else:
             self.report({'WARNING'}, "No selected UV vertex/loops found in any island.")
             return {'CANCELLED'}
-
 
 class NASH3D_OT_snap_to_vertex(bpy.types.Operator):
     """Snap one selected island to another based on two selected vertices.
@@ -326,29 +278,50 @@ and the other island will snap to it."""
             return {'CANCELLED'}
             
         active_face = bm.faces.active
+        if not active_face:
+            self.report({'ERROR'}, "Please ensure there is an active face in the target island.")
+            return {'CANCELLED'}
+            
+        islands = get_uv_islands(bm, uv_layer)
         
-        target_group = uv_groups[0]
-        source_group = uv_groups[1]
-        
-        if active_face:
-            for grp in uv_groups:
-                if any(l.face == active_face for l in grp):
-                    target_group = grp
-                    source_group = uv_groups[0] if uv_groups[1] == grp else uv_groups[1]
+        active_island = None
+        if active_face.loops:
+            first_loop = active_face.loops[0]
+            for island in islands:
+                if first_loop in island:
+                    active_island = island
                     break
                     
-        islands = get_uv_islands(bm, uv_layer)
-        source_island = None
-        target_island = None
+        if not active_island:
+            self.report({'ERROR'}, "Could not find the island containing the active face.")
+            return {'CANCELLED'}
+            
+        target_group = None
+        source_group = None
         
+        for grp in uv_groups:
+            if grp[0] in active_island:
+                target_group = grp
+            else:
+                source_group = grp
+                
+        if not target_group:
+            self.report({'ERROR'}, "No selected vertex found in the active face's island (Target Island).")
+            return {'CANCELLED'}
+            
+        if not source_group:
+            self.report({'ERROR'}, "No selected vertex found in the secondary island (Source Island).")
+            return {'CANCELLED'}
+            
+        target_island = active_island
+        source_island = None
         for island in islands:
             if source_group[0] in island:
                 source_island = island
-            if target_group[0] in island:
-                target_island = island
+                break
                 
-        if not source_island or not target_island:
-            self.report({'ERROR'}, "Could not determine islands for the selected vertices.")
+        if not source_island:
+            self.report({'ERROR'}, "Could not determine the island for the second selected vertex.")
             return {'CANCELLED'}
             
         if source_island == target_island:
@@ -366,7 +339,6 @@ and the other island will snap to it."""
         bmesh.update_edit_mesh(obj.data)
         self.report({'INFO'}, "Snapped Island A to Island B.")
         return {'FINISHED'}
-
 
 class NASH3D_OT_rotate_uv_island(bpy.types.Operator):
     """Rotate the selected UV island by a specific angle"""
@@ -480,7 +452,6 @@ class NASH3D_OT_rotate_uv_island(bpy.types.Operator):
         else:
             self.report({'WARNING'}, "No selected UV vertex/loops found in any island.")
             return {'CANCELLED'}
-
 
 # =========================================================================
 # TEXEL DENSITY OPERATOR
@@ -630,7 +601,6 @@ class NASH3D_OT_set_texel_density(bpy.types.Operator):
         )
         return {'FINISHED'}
 
-
 # =========================================================================
 # LATTICE DEFORMER OPERATOR
 # =========================================================================
@@ -725,7 +695,6 @@ class NASH3D_OT_create_lattice(bpy.types.Operator):
             self.report({'ERROR'}, f"Failed to create lattice: {str(e)}")
             return {'CANCELLED'}
 
-
 # =========================================================================
 # GROUP TOGETHER OPERATOR
 # =========================================================================
@@ -790,7 +759,6 @@ class NASH3D_OT_group_together(bpy.types.Operator):
 
         self.report({'INFO'}, f"Grouped {len(selected_objects)} objects under '{empty_obj.name}' in the active collection")
         return {'FINISHED'}
-
 
 # =========================================================================
 # EASY BEVEL OPERATOR
@@ -861,7 +829,6 @@ class NASH3D_OT_easy_bevel(bpy.types.Operator):
             self.report({'ERROR'}, f"Failed to apply Easy Bevel: {str(e)}")
             return {'CANCELLED'}
 
-
 # =========================================================================
 # UNBEVEL OPERATOR
 # =========================================================================
@@ -923,7 +890,6 @@ class NASH3D_OT_unbevel(bpy.types.Operator):
             self.report({'ERROR'}, f"Failed to apply Unbevel: {str(e)}")
             return {'CANCELLED'}
 
-
 # =========================================================================
 # COLOR SWATCH
 # =========================================================================
@@ -937,7 +903,6 @@ class NASH3D_RecentColorItem(bpy.types.PropertyGroup):
         max=1.0,
         default=(0.0, 0.0, 0.0, 1.0)
     )
-
 
 def push_recent_color(scene, color_tuple):
     """Push a color into the scene's color swatch ring buffer (max 5).
@@ -966,7 +931,6 @@ def push_recent_color(scene, color_tuple):
         while len(history) > max_slots:
             history.remove(len(history) - 1)
 
-
 class NASH3D_OT_pick_recent_color(bpy.types.Operator):
     """Set the active vertex paint fill color from a color swatch"""
     bl_idname = "nash3d.pick_recent_color"
@@ -982,7 +946,6 @@ class NASH3D_OT_pick_recent_color(bpy.types.Operator):
             scene.oshan_vcol_fill_color = history[self.index].color
         return {'FINISHED'}
 
-
 class NASH3D_OT_add_to_swatch(bpy.types.Operator):
     """Add the current Fill Color to the Color Swatch"""
     bl_idname = "nash3d.add_to_swatch"
@@ -994,7 +957,6 @@ class NASH3D_OT_add_to_swatch(bpy.types.Operator):
         color = tuple(scene.oshan_vcol_fill_color)
         push_recent_color(scene, color)
         return {'FINISHED'}
-
 
 class NASH3D_OT_pick_value_color(bpy.types.Operator):
     """Set the active vertex paint fill color from a generated value swatch"""
@@ -1010,7 +972,6 @@ class NASH3D_OT_pick_value_color(bpy.types.Operator):
         if 0 <= self.index < len(history):
             scene.oshan_vcol_fill_color = history[self.index].color
         return {'FINISHED'}
-
 
 class NASH3D_OT_generate_value_swatch(bpy.types.Operator):
     """Generate a 5-color swatch with varying values based on the current Fill Color"""
@@ -1038,7 +999,6 @@ class NASH3D_OT_generate_value_swatch(bpy.types.Operator):
             item.color = (c.r, c.g, c.b, alpha)
             
         return {'FINISHED'}
-
 
 # =========================================================================
 # CLEAN VERTEX COLORS OPERATOR
@@ -1120,7 +1080,6 @@ class NASH3D_OT_clean_vertex_colors(bpy.types.Operator):
         )
         return {'FINISHED'}
 
-
 # =========================================================================
 # RANDOM VERTEX COLORS OPERATOR
 # =========================================================================
@@ -1181,7 +1140,6 @@ class NASH3D_OT_random_vertex_colors(bpy.types.Operator):
 
         self.report({'INFO'}, f"Assigned random colors to {processed_objects} object(s).")
         return {'FINISHED'}
-
 
 # =========================================================================
 # EASY SMOOTH OPERATOR
@@ -1281,7 +1239,6 @@ class NASH3D_OT_easy_smooth(bpy.types.Operator):
             self.report({'ERROR'}, f"Failed to apply Easy Smooth: {str(e)}")
             return {'CANCELLED'}
 
-
 # =========================================================================
 # UPDATER OPERATOR
 # =========================================================================
@@ -1347,7 +1304,6 @@ class NASH3D_OT_update_addon(bpy.types.Operator):
                     pass
             return {'CANCELLED'}
 
-
 # =========================================================================
 # ADDON PREFERENCES
 # =========================================================================
@@ -1369,7 +1325,6 @@ class Nash3D_QuickPanel_Preferences(bpy.types.AddonPreferences):
         row.prop(self, "update_file_path", text="")
         row.operator("nash3d.update_addon", text="Apply Update", icon='FILE_REFRESH')
 
-
 # =========================================================================
 # UI PANEL (PARENT CONTAINER)
 # =========================================================================
@@ -1385,7 +1340,6 @@ class VIEW3D_PT_oshan_quick_tools(bpy.types.Panel):
     def draw(self, context):
         # Container panel draws nothing directly, acting as a clean wrapper for collapsible subpanels
         pass
-
 
 # =========================================================================
 # COLLAPSIBLE SUBPANEL (LATTICE DEFORMER)
@@ -1435,7 +1389,6 @@ class VIEW3D_PT_oshan_lattice_subpanel(bpy.types.Panel):
         op.resolution_v = scene.oshan_lattice_res_v
         op.resolution_w = scene.oshan_lattice_res_w
 
-
 # =========================================================================
 # COLLAPSIBLE SUBPANEL (GROUP TOGETHER)
 # =========================================================================
@@ -1452,7 +1405,6 @@ class VIEW3D_PT_oshan_group_subpanel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         layout.operator("nash3d.group_together", text="Group", icon='OUTLINER_OB_EMPTY')
-
 
 # =========================================================================
 # COLLAPSIBLE SUBPANEL (EASY BEVEL)
@@ -1472,7 +1424,6 @@ class VIEW3D_PT_oshan_easy_bevel_subpanel(bpy.types.Panel):
         row = layout.row(align=True)
         row.operator("nash3d.easy_bevel", text="Bevel it!", icon='MOD_BEVEL')
         row.operator("nash3d.unbevel", text="Unbevel It!", icon='X')
-
 
 # =========================================================================
 # COLLAPSIBLE SUBPANEL (EASY SMOOTH)
@@ -1502,7 +1453,6 @@ class VIEW3D_PT_oshan_easy_smooth_subpanel(bpy.types.Panel):
         note.label(text="Smooths & sharpens edges by angle.")
         note.label(text="Adds Weighted Normal modifier.")
         note.label(text="*Edit Mode: Affects selected edges only.")
-
 
 # =========================================================================
 # COLLAPSIBLE SUBPANEL (VERTEX PAINT TOOLS)
@@ -1570,7 +1520,6 @@ class VIEW3D_PT_oshan_vertex_paint_subpanel(bpy.types.Panel):
             
         col.operator("nash3d.generate_value_swatch", text="Generate Value Swatch", icon='COLORSET_13_VEC')
 
-
 # =========================================================================
 # ABOUT SUBPANEL
 # =========================================================================
@@ -1589,7 +1538,6 @@ class VIEW3D_PT_oshan_about_subpanel(bpy.types.Panel):
         col = layout.column(align=True)
         col.label(text="Created by Oshan Devinda", icon='USER')
         col.label(text="(aka Nasho3D)")
-
 
 # =========================================================================
 # UV TOOLS PANEL (UV EDITOR SIDEBAR)
@@ -1615,10 +1563,147 @@ class IMAGE_PT_oshan_uv_tools(bpy.types.Panel):
         if not (obj and obj.type == 'MESH' and obj.mode == 'EDIT'):
             layout.label(text="Enter Edit Mode with a Mesh", icon='INFO')
 
-
 # =========================================================================
 # SNAPPING TOOLS SUBPANEL
 # =========================================================================
+# =========================================================================
+# EXPLODE ISLANDS OPERATOR
+# =========================================================================
+class NASH3D_OT_explode_islands(bpy.types.Operator):
+    """Spread all selected UV islands apart with a margin so they are clearly visible and easy to arrange manually"""
+    bl_idname = "nash3d.explode_islands"
+    bl_label = "Explode Islands"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    margin: bpy.props.FloatProperty(
+        name="Margin",
+        description="Spacing between islands after exploding",
+        default=0.05,
+        min=0.0,
+        max=1.0
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return (context.active_object and
+                context.active_object.type == 'MESH' and
+                context.active_object.mode == 'EDIT')
+
+    def execute(self, context):
+        obj = context.active_object
+        me = obj.data
+        bm = bmesh.from_edit_mesh(me)
+        uv_layer = bm.loops.layers.uv.verify()
+
+        # ---- Collect islands using only selected faces ----
+        # Each island is a set of loops whose UV positions we will translate
+        selected_faces = [f for f in bm.faces if f.select]
+        if not selected_faces:
+            self.report({'WARNING'}, "No faces selected.")
+            return {'CANCELLED'}
+
+        # Build a union-find structure over loops to detect connected UV islands
+        loops_in_selected = []
+        for f in selected_faces:
+            for l in f.loops:
+                loops_in_selected.append(l)
+
+        parent = {l: l for l in loops_in_selected}
+
+        def find(l):
+            while parent[l] is not l:
+                parent[l] = parent[parent[l]]
+                l = parent[l]
+            return l
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra is not rb:
+                parent[ra] = rb
+
+        # Connect loops within the same face
+        for f in selected_faces:
+            fl = f.loops[:]
+            for i in range(1, len(fl)):
+                union(fl[0], fl[i])
+
+        # Connect loops that share a vertex AND the same UV coordinate (i.e. are welded in UV space)
+        from collections import defaultdict
+        vert_to_loops = defaultdict(list)
+        for l in loops_in_selected:
+            vert_to_loops[l.vert].append(l)
+
+        for vert, vloops in vert_to_loops.items():
+            # Group by UV coordinate
+            uv_groups = []
+            for l in vloops:
+                uv = l[uv_layer].uv.copy()
+                placed = False
+                for grp in uv_groups:
+                    if (uv - grp[0][uv_layer].uv).length < 1e-5:
+                        grp.append(l)
+                        placed = True
+                        break
+                if not placed:
+                    uv_groups.append([l])
+            for grp in uv_groups:
+                for i in range(1, len(grp)):
+                    union(grp[0], grp[i])
+
+        # Collect islands as list of loops grouped by root
+        island_map = defaultdict(list)
+        for l in loops_in_selected:
+            island_map[find(l)].append(l)
+        islands = list(island_map.values())
+
+        if len(islands) <= 1:
+            self.report({'INFO'}, "Only one island found — nothing to explode.")
+            return {'CANCELLED'}
+
+        # ---- Compute AABB for each island ----
+        def island_bbox(loops):
+            xs = [l[uv_layer].uv.x for l in loops]
+            ys = [l[uv_layer].uv.y for l in loops]
+            return min(xs), min(ys), max(xs), max(ys)
+
+        bboxes = [island_bbox(isl) for isl in islands]
+
+        # ---- Determine grid layout ----
+        import math
+        count = len(islands)
+        cols = math.ceil(math.sqrt(count))
+        rows = math.ceil(count / cols)
+
+        # Island dimensions (max width/height across all islands for uniform grid)
+        widths  = [b[2] - b[0] for b in bboxes]
+        heights = [b[3] - b[1] for b in bboxes]
+        cell_w  = max(widths)  + self.margin
+        cell_h  = max(heights) + self.margin
+
+        # ---- Translate each island so they form a neat grid ----
+        for idx, (isl, bb) in enumerate(zip(islands, bboxes)):
+            col_i = idx % cols
+            row_i = idx // cols
+
+            # Target origin (lower-left corner of the cell)
+            target_x = col_i * cell_w
+            target_y = row_i * cell_h
+
+            # Current lower-left corner
+            cur_x, cur_y = bb[0], bb[1]
+
+            dx = target_x - cur_x
+            dy = target_y - cur_y
+
+            for l in isl:
+                l[uv_layer].uv.x += dx
+                l[uv_layer].uv.y += dy
+
+        bmesh.update_edit_mesh(me)
+        self.report({'INFO'}, f"Exploded {len(islands)} UV islands.")
+        return {'FINISHED'}
+
+
 class IMAGE_PT_oshan_uv_snapping(bpy.types.Panel):
     bl_label = "Snapping tools"
     bl_idname = "IMAGE_PT_oshan_uv_snapping"
@@ -1653,7 +1738,8 @@ class IMAGE_PT_oshan_uv_snapping(bpy.types.Panel):
         
         col.separator(factor=0.5)
         col.operator("nash3d.snap_to_vertex", text="Snap to Vertex", icon='SNAP_VERTEX')
-
+        col.separator(factor=0.5)
+        col.operator("nash3d.explode_islands", text="Explode Islands", icon='STICKY_UVS_DISABLE')
 
 # =========================================================================
 # ROTATING TOOLS SUBPANEL
@@ -1696,7 +1782,6 @@ class IMAGE_PT_oshan_uv_rotating(bpy.types.Panel):
         op_cw.angle = -scene.oshan_uv_rotate_increment
         op_cw.pivot = scene.oshan_uv_rotate_pivot
 
-
 # =========================================================================
 # TEXEL DENSITY SUBPANEL (UV EDITOR SIDEBAR)
 # =========================================================================
@@ -1734,6 +1819,1018 @@ class IMAGE_PT_oshan_texel_density(bpy.types.Panel):
         op = col.operator("nash3d.set_texel_density", text="Set Texel Density", icon='UV_DATA')
         op.pivot = scene.oshan_td_scale_pivot
 
+# =========================================================================
+# MISC TOOLS OPERATORS & SUBPANEL
+# =========================================================================
+class NASH3D_OT_remove_all_materials(bpy.types.Operator):
+    """Remove materials from all selected objects"""
+    bl_idname = "nash3d.remove_all_materials"
+    bl_label = "Remove All Materials"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.selected_objects)
+
+    def execute(self, context):
+        count = 0
+        for obj in context.selected_objects:
+            if hasattr(obj.data, "materials") and obj.data.materials:
+                obj.data.materials.clear()
+                count += 1
+        self.report({'INFO'}, f"Removed materials from {count} objects.")
+        return {'FINISHED'}
+
+class NASH3D_OT_copy_materials(bpy.types.Operator):
+    """Copy materials from active object to selected objects"""
+    bl_idname = "nash3d.copy_materials"
+    bl_label = "Copy Materials to Selected"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return len(context.selected_objects) > 1 and context.active_object and context.active_object in context.selected_objects
+
+    def execute(self, context):
+        active_obj = context.active_object
+        selected_objects = context.selected_objects
+
+        if len(selected_objects) <= 1:
+            self.report({'WARNING'}, "Select more than one object.")
+            return {'CANCELLED'}
+
+        active_materials = active_obj.data.materials if hasattr(active_obj.data, "materials") else []
+
+        count = 0
+        for obj in selected_objects:
+            if obj != active_obj and hasattr(obj.data, "materials"):
+                obj.data.materials.clear()
+                for mat in active_materials:
+                    obj.data.materials.append(mat)
+                count += 1
+
+        self.report({'INFO'}, f"Copied materials to {count} objects.")
+        return {'FINISHED'}
+
+class VIEW3D_PT_oshan_misc_tools_subpanel(bpy.types.Panel):
+    """Subpanel for Miscellaneous Tools"""
+    bl_label = "Misc Tools"
+    bl_idname = "VIEW3D_PT_oshan_misc_tools_subpanel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Oshan Tools'
+    bl_parent_id = "VIEW3D_PT_oshan_quick_tools"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        col = layout.column(align=True)
+        col.operator("nash3d.remove_all_materials", text="Remove All Materials", icon='X')
+        col.operator("nash3d.copy_materials", text="Copy Materials to Selected", icon='COPYDOWN')
+
+# =========================================================================
+# DEFORMING TOOLS OPERATORS & SUBPANEL
+# =========================================================================
+# =========================================================================
+# UV SQUARES HELPER FUNCTIONS
+# =========================================================================
+from collections import defaultdict
+from math import radians, hypot
+from timeit import default_timer as timer
+
+precision = 3
+
+BLENDER_5_0_OR_NEWER = bpy.app.version >= (5, 0, 0)
+
+def is_uv_vert_selected(loop, uv_layer):
+    if BLENDER_5_0_OR_NEWER:
+        return loop.uv_select_vert
+    else:
+        return loop[uv_layer].select
+
+def set_uv_vert_selected(loop, uv_layer, selected):
+    if BLENDER_5_0_OR_NEWER:
+        loop.uv_select_vert = selected
+    else:
+        loop[uv_layer].select = selected
+
+#todo: make joining radius scale with editor zoom rate or average unit length
+#todo: align to axis by respect to vert distance
+#todo: snap 2dCursor to closest selected vert (when more vertices are selected
+#todo: rip different vertex on each press
+
+def main(context, operator, square = False, snapToClosest = False):
+    if context.scene.tool_settings.use_uv_select_sync:
+        operator.report({'ERROR'}, "Please disable 'Keep UV and edit mesh in sync'")
+        # context.scene.tool_settings.use_uv_select_sync = False
+        return
+
+    selected_objects = context.selected_objects
+    if (context.edit_object not in selected_objects):
+        selected_objects.append(context.edit_object)
+
+    for obj in selected_objects:
+        if (obj.type == "MESH"):
+            main1(obj, context, operator, square, snapToClosest)
+
+def main1(obj, context, operator, square, snapToClosest):
+    if context.scene.tool_settings.use_uv_select_sync:
+        operator.report({'ERROR'}, "Please disable 'Keep UV and edit mesh in sync'")
+        # context.scene.tool_settings.use_uv_select_sync = False
+        return
+
+    startTime = timer()
+    me = obj.data
+    bm = bmesh.from_edit_mesh(me)
+    uv_layer = bm.loops.layers.uv.verify()
+    # bm.faces.layers.tex.verify()  # currently blender needs both layers.
+
+    edgeVerts, filteredVerts, selFaces, nonQuadFaces, vertsDict, noEdge = ListsOfVerts(uv_layer, bm)
+
+    if len(filteredVerts) == 0: return
+    if len(filteredVerts) == 1:
+        SnapCursorToClosestSelected(filteredVerts)
+        return
+
+    cursorClosestTo = CursorClosestTo(filteredVerts)
+    #line is selected
+
+    if len(selFaces) == 0:
+        if snapToClosest == True:
+            SnapCursorToClosestSelected(filteredVerts)
+            return
+
+        VertsDictForLine(uv_layer, bm, filteredVerts, vertsDict)
+
+        if AreVectsLinedOnAxis(filteredVerts) == False:
+            ScaleTo0OnAxisAndCursor(filteredVerts, vertsDict, cursorClosestTo)
+            return SuccessFinished(me, startTime)
+
+        MakeEqualDistanceBetweenVertsInLine(filteredVerts, vertsDict, cursorClosestTo)
+        return SuccessFinished(me, startTime)
+
+    # deselect non quads
+    for nf in nonQuadFaces:
+        for l in nf.loops:
+            set_uv_vert_selected(l, uv_layer, False)
+
+    def isFaceSelected(f):
+        return f.select and all(is_uv_vert_selected(l, uv_layer) for l in f.loops)
+
+    def getIslandFromFace(startFace):
+        island = set()
+        toCheck = set([startFace])
+
+        while (len(toCheck)):
+            face = toCheck.pop()
+            if isFaceSelected(face) and face not in island:
+                island.add(face)
+                adjacentFaces = []
+                for e in face.edges:
+                    if e.seam == False:
+                        for f in e.link_faces:
+                            if f != face:
+                                adjacentFaces.append(f)
+                toCheck.update(adjacentFaces)
+
+        return island
+
+    def getIslandsFromSelectedFaces(selectedFaces):
+        islands = []
+        toCheck = set(selectedFaces)
+        while(len(toCheck)):
+            face = toCheck.pop()
+            island = getIslandFromFace(face)
+            islands.append(island)
+            toCheck.difference_update(island)
+        return islands
+
+    islands = getIslandsFromSelectedFaces(selFaces)
+
+    def main2 (targetFace, faces):
+        ShapeFace(uv_layer, operator, targetFace, vertsDict, square)
+
+        if square: FollowActiveUV(operator, me, targetFace, faces, 'EVEN')
+        else: FollowActiveUV(operator, me, targetFace, faces)
+
+    for island in islands:
+        targetFace = bm.faces.active
+        if (targetFace == None or
+            targetFace not in island or
+            len(islands) > 1 or
+            targetFace.select == False or
+            len(targetFace.verts) != 4):
+                targetFace = next(iter(island))
+
+        main2(targetFace, island)
+
+    if noEdge == False:
+        #edge has ripped so we connect it back
+        for ev in edgeVerts:
+            key = (round(ev.uv.x, precision), round(ev.uv.y, precision))
+            if key in vertsDict:
+                ev.uv = vertsDict[key][0].uv
+                # Note: ev is a BMLoopUV, need to find the loop to set selection
+                # This will be handled by the fact that vertsDict syncs positions
+
+    return SuccessFinished(me, startTime)
+
+'''def ScaleSelection(factor, pivot = 'CURSOR'):
+    last_pivot = bpy.context.space_data.pivot_point
+    bpy.context.space_data.pivot_point = pivot
+    bpy.ops.transform.resize(value=(factor, factor, factor), constraint_axis=(False, False, False), mirror=False, proportional_edit_falloff='SMOOTH', proportional_size=1)
+    bpy.context.space_data.pivot_point = last_pivot
+    return'''
+
+def ShapeFace(uv_layer, operator, targetFace, vertsDict, square):
+    corners = []
+    for l in targetFace.loops:
+        luv = l[uv_layer]
+        corners.append(luv)
+
+    if len(corners) != 4:
+        #operator.report({'ERROR'}, "bla")
+        return
+
+    lucv, ldcv, rucv, rdcv = Corners(corners)
+
+    cct = CursorClosestTo([lucv, ldcv, rdcv, rucv])
+    MakeUvFaceEqualRectangle(vertsDict, lucv, rucv, rdcv, ldcv, cct, square)
+    return
+
+def MakeUvFaceEqualRectangle(vertsDict, lucv, rucv, rdcv, ldcv, startv, square = False):
+    sizeX, sizeY = ImageSize()
+    ratio = sizeX/sizeY
+
+    if startv == None: startv = lucv.uv
+    elif AreVertsQuasiEqual(startv, rucv): startv = rucv.uv
+    elif AreVertsQuasiEqual(startv, rdcv): startv = rdcv.uv
+    elif AreVertsQuasiEqual(startv, ldcv): startv = ldcv.uv
+    else: startv = lucv.uv
+
+    lucv = lucv.uv
+    rucv = rucv.uv
+    rdcv = rdcv.uv
+    ldcv = ldcv.uv
+
+    if (startv == lucv):
+        finalScaleX = hypotVert(lucv, rucv)
+        finalScaleY = hypotVert(lucv, ldcv)
+        currRowX = lucv.x
+        currRowY = lucv.y
+
+    elif (startv == rucv):
+        finalScaleX = hypotVert(rucv, lucv)
+        finalScaleY = hypotVert(rucv, rdcv)
+        currRowX = rucv.x - finalScaleX
+        currRowY = rucv.y
+
+    elif (startv == rdcv):
+        finalScaleX = hypotVert(rdcv, ldcv)
+        finalScaleY = hypotVert(rdcv, rucv)
+        currRowX = rdcv.x - finalScaleX
+        currRowY = rdcv.y + finalScaleY
+
+    else:
+        finalScaleX = hypotVert(ldcv, rdcv)
+        finalScaleY = hypotVert(ldcv, lucv)
+        currRowX = ldcv.x
+        currRowY = ldcv.y +finalScaleY
+
+    if square: finalScaleY = finalScaleX*ratio
+    #lucv, rucv
+    x = round(lucv.x, precision)
+    y = round(lucv.y, precision)
+    for v in vertsDict[(x,y)]:
+        v.uv.x = currRowX
+        v.uv.y = currRowY
+
+    x = round(rucv.x, precision)
+    y = round(rucv.y, precision)
+    for v in vertsDict[(x,y)]:
+        v.uv.x = currRowX + finalScaleX
+        v.uv.y = currRowY
+
+    #rdcv, ldcv
+    x = round(rdcv.x, precision)
+    y = round(rdcv.y, precision)
+    for v in vertsDict[(x,y)]:
+        v.uv.x = currRowX + finalScaleX
+        v.uv.y = currRowY - finalScaleY
+
+    x = round(ldcv.x, precision)
+    y = round(ldcv.y, precision)
+    for v in vertsDict[(x,y)]:
+        v.uv.x = currRowX
+        v.uv.y = currRowY - finalScaleY
+
+
+    return
+
+def SnapCursorToClosestSelected(filteredVerts):
+    #TODO: snap to closest selected
+    if len(filteredVerts) == 1:
+        SetAll2dCursorsTo(filteredVerts[0].uv.x, filteredVerts[0].uv.y)
+
+    return
+
+def ListsOfVerts(uv_layer, bm):
+    edgeVerts = []
+    allEdgeVerts = []
+    filteredVerts = []
+    selFaces = []
+    nonQuadFaces = []
+    vertsDict = defaultdict(list)                #dict
+
+    for f in bm.faces:
+        isFaceSel = True
+        facesEdgeVerts = []
+        if (f.select == False):
+            continue
+
+        #collect edge verts if any
+        for l in f.loops:
+            luv = l[uv_layer]
+            if is_uv_vert_selected(l, uv_layer):
+                facesEdgeVerts.append(luv)
+            else: isFaceSel = False
+
+        allEdgeVerts.extend(facesEdgeVerts)
+        if isFaceSel:
+            if len(f.verts) != 4:
+                nonQuadFaces.append(f)
+                edgeVerts.extend(facesEdgeVerts)
+            else:
+                selFaces.append(f)
+
+                for l in f.loops:
+                    luv = l[uv_layer]
+                    x = round(luv.uv.x, precision)
+                    y = round(luv.uv.y, precision)
+                    vertsDict[(x, y)].append(luv)
+
+        else: edgeVerts.extend(facesEdgeVerts)
+
+    noEdge = False
+    if len(edgeVerts) == 0:
+        noEdge = True
+        edgeVerts.extend(allEdgeVerts)
+
+    if len(selFaces) == 0:
+        for ev in edgeVerts:
+            if ListQuasiContainsVect(filteredVerts, ev) == False:
+                filteredVerts.append(ev)
+    else: filteredVerts = edgeVerts
+
+    return edgeVerts, filteredVerts, selFaces, nonQuadFaces, vertsDict, noEdge
+
+def ListQuasiContainsVect(list, vect):
+    for v in list:
+        if AreVertsQuasiEqual(v, vect):
+            return True
+    return False
+
+#modified ideasman42's uvcalc_follow_active.py
+def FollowActiveUV(operator, me, f_act, faces, EXTEND_MODE = 'LENGTH_AVERAGE'):
+    bm = bmesh.from_edit_mesh(me)
+    uv_act = bm.loops.layers.uv.active
+
+    # our own local walker
+    def walk_face_init(faces, f_act):
+        # first tag all faces True (so we dont uvmap them)
+        for f in bm.faces:
+            f.tag = True
+        # then tag faces arg False
+        for f in faces:
+            f.tag = False
+        # tag the active face True since we begin there
+        f_act.tag = True
+
+    def walk_face(f):
+        # all faces in this list must be tagged
+        f.tag = True
+        faces_a = [f]
+        faces_b = []
+
+        while faces_a:
+            for f in faces_a:
+                for l in f.loops:
+                    l_edge = l.edge
+                    if (l_edge.is_manifold == True) and (l_edge.seam == False):
+                        l_other = l.link_loop_radial_next
+                        f_other = l_other.face
+                        if not f_other.tag:
+                            yield (f, l, f_other)
+                            f_other.tag = True
+                            faces_b.append(f_other)
+            # swap
+            faces_a, faces_b = faces_b, faces_a
+            faces_b.clear()
+
+    def walk_edgeloop(l):
+        """
+        Could make this a generic function
+        """
+        e_first = l.edge
+        e = None
+        while True:
+            e = l.edge
+            yield e
+
+            # don't step past non-manifold edges
+            if e.is_manifold:
+                # welk around the quad and then onto the next face
+                l = l.link_loop_radial_next
+                if len(l.face.verts) == 4:
+                    l = l.link_loop_next.link_loop_next
+                    if l.edge == e_first:
+                        break
+                else:
+                    break
+            else:
+                break
+
+    def extrapolate_uv(fac,
+                       l_a_outer, l_a_inner,
+                       l_b_outer, l_b_inner):
+        l_b_inner[:] = l_a_inner
+        l_b_outer[:] = l_a_inner + ((l_a_inner - l_a_outer) * fac)
+
+    def apply_uv(f_prev, l_prev, f_next):
+        l_a = [None, None, None, None]
+        l_b = [None, None, None, None]
+
+        l_a[0] = l_prev
+        l_a[1] = l_a[0].link_loop_next
+        l_a[2] = l_a[1].link_loop_next
+        l_a[3] = l_a[2].link_loop_next
+
+        #  l_b
+        #  +-----------+
+        #  |(3)        |(2)
+        #  |           |
+        #  |l_next(0)  |(1)
+        #  +-----------+
+        #        ^
+        #  l_a   |
+        #  +-----------+
+        #  |l_prev(0)  |(1)
+        #  |    (f)    |
+        #  |(3)        |(2)
+        #  +-----------+
+        #  copy from this face to the one above.
+
+        # get the other loops
+        l_next = l_prev.link_loop_radial_next
+        if l_next.vert != l_prev.vert:
+            l_b[1] = l_next
+            l_b[0] = l_b[1].link_loop_next
+            l_b[3] = l_b[0].link_loop_next
+            l_b[2] = l_b[3].link_loop_next
+        else:
+            l_b[0] = l_next
+            l_b[1] = l_b[0].link_loop_next
+            l_b[2] = l_b[1].link_loop_next
+            l_b[3] = l_b[2].link_loop_next
+
+        l_a_uv = [l[uv_act].uv for l in l_a]
+        l_b_uv = [l[uv_act].uv for l in l_b]
+
+        if EXTEND_MODE == 'LENGTH_AVERAGE':
+            try:
+                fac = edge_lengths[l_b[2].edge.index][0] / edge_lengths[l_a[1].edge.index][0]
+            except ZeroDivisionError:
+                fac = 1.0
+        elif EXTEND_MODE == 'LENGTH':
+            a0, b0, c0 = l_a[3].vert.co, l_a[0].vert.co, l_b[3].vert.co
+            a1, b1, c1 = l_a[2].vert.co, l_a[1].vert.co, l_b[2].vert.co
+
+            d1 = (a0 - b0).length + (a1 - b1).length
+            d2 = (b0 - c0).length + (b1 - c1).length
+            try:
+                fac = d2 / d1
+            except ZeroDivisionError:
+                fac = 1.0
+        else:
+            fac = 1.0
+
+        extrapolate_uv(fac,
+                       l_a_uv[3], l_a_uv[0],
+                       l_b_uv[3], l_b_uv[0])
+
+        extrapolate_uv(fac,
+                       l_a_uv[2], l_a_uv[1],
+                       l_b_uv[2], l_b_uv[1])
+
+    # -------------------------------------------
+    # Calculate average length per loop if needed
+
+    if EXTEND_MODE == 'LENGTH_AVERAGE':
+        bm.edges.index_update()
+        edge_lengths = [None] * len(bm.edges)   #NoneType times the length of edges list
+
+        for f in faces:
+            # we know its a quad
+            l_quad = f.loops[:]
+            l_pair_a = (l_quad[0], l_quad[2])
+            l_pair_b = (l_quad[1], l_quad[3])
+
+            for l_pair in (l_pair_a, l_pair_b):
+                if edge_lengths[l_pair[0].edge.index] == None:
+
+                    edge_length_store = [-1.0]
+                    edge_length_accum = 0.0
+                    edge_length_total = 0
+
+                    for l in l_pair:
+                        if edge_lengths[l.edge.index] == None:
+                            for e in walk_edgeloop(l):
+                                if edge_lengths[e.index] == None:
+                                    edge_lengths[e.index] = edge_length_store
+                                    edge_length_accum += e.calc_length()
+                                    edge_length_total += 1
+
+                    edge_length_store[0] = edge_length_accum / edge_length_total
+
+    # done with average length
+    # ------------------------
+
+    walk_face_init(faces, f_act)
+    for f_triple in walk_face(f_act):
+        apply_uv(*f_triple)
+
+    bmesh.update_edit_mesh(me, loop_triangles=False)
+
+'''----------------------------------'''
+
+def SuccessFinished(me, startTime):
+    #use for backtrack of steps
+    #bpy.ops.ed.undo_push()
+    bmesh.update_edit_mesh(me)
+    elapsed = round(timer()-startTime, 2)
+    #if (elapsed >= 0.05): operator.report({'INFO'}, "UvSquares finished, elapsed:", elapsed, "s.")
+    if (elapsed >= 0.05): print("UvSquares finished, elapsed:", elapsed, "s.")
+    return
+
+'''def SymmetrySelected(axis, pivot = "MEDIAN"):
+    last_pivot = bpy.context.space_data.pivot_point
+    bpy.context.space_data.pivot_point = pivot
+    bpy.ops.transform.mirror(constraint_axis=(True, False, False), constraint_orientation='GLOBAL', proportional_edit_falloff='SMOOTH', proportional_size=1)
+    bpy.context.space_data.pivot_point = last_pivot
+    return'''
+
+def AreVectsLinedOnAxis(verts):
+    areLinedX = True
+    areLinedY = True
+    allowedError = 0.00001
+    valX = verts[0].uv.x
+    valY = verts[0].uv.y
+    for v in verts:
+        if abs(valX - v.uv.x) > allowedError:
+            areLinedX = False
+        if abs(valY - v.uv.y) > allowedError:
+            areLinedY = False
+    return areLinedX or areLinedY
+
+def MakeEqualDistanceBetweenVertsInLine(filteredVerts, vertsDict, startv = None):
+    verts = filteredVerts
+    verts.sort(key=lambda x: x.uv[0])      #sort by .x
+
+    first = verts[0].uv
+    last = verts[len(verts)-1].uv
+
+    horizontal = True
+    if ((last.x - first.x) >0.00001):
+        slope = (last.y - first.y)/(last.x - first.x)
+        if (slope > 1) or (slope <-1):
+            horizontal = False
+    else:
+        horizontal = False
+
+    if horizontal == True:
+        length = hypot(first.x - last.x, first.y - last.y)
+
+        if startv == last:
+            currentX = last.x - length
+            currentY = last.y
+        else:
+            currentX = first.x
+            currentY = first.y
+    else:
+        verts.sort(key=lambda x: x.uv[1])  #sort by .y
+        verts.reverse()     #reverse because y values drop from up to down
+        first = verts[0].uv
+        last = verts[len(verts)-1].uv
+
+        length = hypot(first.x - last.x, first.y - last.y)  # we have to call length here because if it is not Hor first and second can not actually be first and second
+
+        if startv == last:
+            currentX = last.x
+            currentY = last.y + length
+
+        else:
+            currentX = first.x
+            currentY = first.y
+
+    numberOfVerts = len(verts)
+    finalScale = length / (numberOfVerts-1)
+
+    if horizontal == True:
+        first = verts[0]
+        last = verts[len(verts)-1]
+
+        for v in verts:
+            v = v.uv
+            x = round(v.x, precision)
+            y = round(v.y, precision)
+
+            for vert in vertsDict[(x,y)]:
+                vert.uv.x = currentX
+                vert.uv.y = currentY
+
+            currentX = currentX + finalScale
+    else:
+        for v in verts:
+            x = round(v.uv.x, precision)
+            y = round(v.uv.y, precision)
+
+            for vert in vertsDict[(x,y)]:
+                vert.uv.x = currentX
+                vert.uv.y = currentY
+
+            currentY = currentY - finalScale
+    return
+
+def VertsDictForLine(uv_layer, bm, selVerts, vertsDict):
+    for f in bm.faces:
+        for l in f.loops:
+                luv = l[uv_layer]
+                if is_uv_vert_selected(l, uv_layer):
+                    x = round(luv.uv.x, precision)
+                    y = round(luv.uv.y, precision)
+
+                    vertsDict[(x, y)].append(luv)
+    return
+
+def ScaleTo0OnAxisAndCursor(filteredVerts, vertsDict, startv = None, horizontal = None):
+
+    verts = filteredVerts
+    verts.sort(key=lambda x: x.uv[0])      #sort by .x
+
+    first = verts[0]
+    last = verts[len(verts)-1]
+
+    if horizontal == None:
+        horizontal = True
+        if ((last.uv.x - first.uv.x) >0.00001):
+            slope = (last.uv.y - first.uv.y)/(last.uv.x - first.uv.x)
+            if (slope > 1) or (slope <-1):
+                horizontal = False
+        else:
+            horizontal = False
+
+    if horizontal == True:
+        if startv == None:
+            startv = first
+
+        SetAll2dCursorsTo(startv.uv.x, startv.uv.y)
+        #scale to 0 on Y
+        ScaleTo0('Y')
+        return
+
+    else:
+        verts.sort(key=lambda x: x.uv[1])  #sort by .y
+        verts.reverse()     #reverse because y values drop from up to down
+        first = verts[0]
+        last = verts[len(verts)-1]
+        if startv == None:
+            startv = first
+
+        SetAll2dCursorsTo(startv.uv.x, startv.uv.y)
+        #scale to 0 on X
+        ScaleTo0('X')
+        return
+
+def ScaleTo0(axis):
+    last_pivot = bpy.context.space_data.pivot_point
+    bpy.context.space_data.pivot_point = 'CURSOR'
+
+    for area in bpy.context.screen.areas:
+        if area.type == 'IMAGE_EDITOR':
+            if axis == 'Y':
+                bpy.ops.transform.resize(value=(1, 0, 1), constraint_axis=(False, True, False), mirror=False, proportional_edit_falloff='SMOOTH', proportional_size=1)
+            else:
+                bpy.ops.transform.resize(value=(0, 1, 1), constraint_axis=(True, False, False), mirror=False, proportional_edit_falloff='SMOOTH', proportional_size=1)
+
+
+    bpy.context.space_data.pivot_point = last_pivot
+    return
+
+
+def hypotVert(v1, v2):
+    hyp = hypot(v1.x - v2.x, v1.y - v2.y)
+    return hyp
+
+def Corners(corners):
+    firstHighest = corners[0]
+    for c in corners:
+        if c.uv.y > firstHighest.uv.y:
+            firstHighest = c
+    corners.remove(firstHighest)
+
+    secondHighest = corners[0]
+    for c in corners:
+        if (c.uv.y > secondHighest.uv.y):
+            secondHighest = c
+
+    if firstHighest.uv.x < secondHighest.uv.x:
+        leftUp = firstHighest
+        rightUp = secondHighest
+    else:
+        leftUp = secondHighest
+        rightUp = firstHighest
+    corners.remove(secondHighest)
+
+    firstLowest = corners[0]
+    secondLowest = corners[1]
+
+    if firstLowest.uv.x < secondLowest.uv.x:
+        leftDown = firstLowest
+        rightDown = secondLowest
+    else:
+        leftDown = secondLowest
+        rightDown = firstLowest
+
+    return leftUp, leftDown, rightUp, rightDown
+
+def ImageSize():
+    ratioX, ratioY = 256,256
+    for a in bpy.context.screen.areas:
+        if a.type == 'IMAGE_EDITOR':
+            img = a.spaces[0].image
+            if img != None and img.size[0] != 0:
+                ratioX, ratioY = img.size[0], img.size[1]
+            break
+    return ratioX, ratioY
+
+def CursorClosestTo(verts):
+    sizeX, sizeY = ImageSize()
+    if bpy.app.version >= (2, 80, 0):
+        sizeX, sizeY = 1,1
+    min = float('inf')
+    minV = verts[0]
+    for v in verts:
+        if v == None: continue
+        for area in bpy.context.screen.areas:
+            if area.type == 'IMAGE_EDITOR':
+                loc = area.spaces[0].cursor_location
+                hyp = hypot(loc.x/sizeX -v.uv.x, loc.y/sizeY -v.uv.y)
+                if (hyp < min):
+                    min = hyp
+                    minV = v
+    return minV
+
+def SetAll2dCursorsTo(x,y):
+    bpy.ops.uv.cursor_set(location=(x, y))
+    return
+
+def AreVertsQuasiEqual(v1, v2, allowedError = 0.00001):
+    if abs(v1.uv.x -v2.uv.x) < allowedError and abs(v1.uv.y -v2.uv.y) < allowedError:
+        return True
+    return False
+
+
+
+class NASH3D_OT_uv_squares(bpy.types.Operator):
+    """Reshapes UV faces to a grid of equivalent squares"""
+    bl_idname = "nash3d.uv_squares"
+    bl_label = "UVs to Grid of Squares"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.active_object and 
+                context.active_object.type == 'MESH' and 
+                context.active_object.mode == 'EDIT')
+
+    def execute(self, context):
+        # We need to temporarily disable sync mode if it's on
+        sync_mode = context.scene.tool_settings.use_uv_select_sync
+        if sync_mode:
+            context.scene.tool_settings.use_uv_select_sync = False
+            
+        try:
+            main(context, self, True)
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to run UV Squares: {str(e)}")
+            return {'CANCELLED'}
+        finally:
+            if sync_mode:
+                context.scene.tool_settings.use_uv_select_sync = True
+                
+        return {'FINISHED'}
+
+# =========================================================================
+# SCALE ISLANDS OPERATORS
+# =========================================================================
+
+def _get_uv_island_loops_for_face(bm, uv_layer, face):
+    """Return loops of the active-face island and lists of loops for all other selected islands."""
+    from collections import defaultdict
+
+    all_loops = []
+    for f in bm.faces:
+        if f.select:
+            for l in f.loops:
+                all_loops.append(l)
+
+    parent = {l: l for l in all_loops}
+
+    def find(l):
+        while parent[l] is not l:
+            parent[l] = parent[parent[l]]
+            l = parent[l]
+        return l
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra is not rb:
+            parent[ra] = rb
+
+    # Connect loops within the same face
+    for f in bm.faces:
+        if f.select:
+            fl = f.loops[:]
+            for i in range(1, len(fl)):
+                union(fl[0], fl[i])
+
+    # Connect loops sharing vertex + UV position
+    vert_to_loops = defaultdict(list)
+    for l in all_loops:
+        vert_to_loops[l.vert].append(l)
+    for vert, vloops in vert_to_loops.items():
+        uv_groups = []
+        for l in vloops:
+            uv = l[uv_layer].uv.copy()
+            placed = False
+            for grp in uv_groups:
+                if (uv - grp[0][uv_layer].uv).length < 1e-5:
+                    grp.append(l)
+                    placed = True
+                    break
+            if not placed:
+                uv_groups.append([l])
+        for grp in uv_groups:
+            for i in range(1, len(grp)):
+                union(grp[0], grp[i])
+
+    island_map = defaultdict(list)
+    for l in all_loops:
+        island_map[find(l)].append(l)
+
+    target_root = find(face.loops[0])
+    active_island = island_map[target_root]
+    other_islands = [loops for root, loops in island_map.items() if root is not target_root]
+    return active_island, other_islands
+
+
+def _island_bbox(loops, uv_layer):
+    xs = [l[uv_layer].uv.x for l in loops]
+    ys = [l[uv_layer].uv.y for l in loops]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+class NASH3D_OT_scale_islands_by_x(bpy.types.Operator):
+    """Uniformly scale all selected UV islands to match the X width of the active-face island"""
+    bl_idname = "nash3d.scale_islands_by_x"
+    bl_label = "Scale Islands by X"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.active_object and
+                context.active_object.type == 'MESH' and
+                context.active_object.mode == 'EDIT')
+
+    def execute(self, context):
+        obj = context.active_object
+        me = obj.data
+        bm = bmesh.from_edit_mesh(me)
+        uv_layer = bm.loops.layers.uv.verify()
+
+        active_face = bm.faces.active
+        if active_face is None or not active_face.select:
+            self.report({'WARNING'}, "No active face selected.")
+            return {'CANCELLED'}
+
+        active_island, other_islands = _get_uv_island_loops_for_face(bm, uv_layer, active_face)
+
+        bb_ref = _island_bbox(active_island, uv_layer)
+        ref_width = bb_ref[2] - bb_ref[0]
+
+        if ref_width < 1e-7:
+            self.report({'WARNING'}, "Active island has zero width.")
+            return {'CANCELLED'}
+
+        for island in other_islands:
+            bb = _island_bbox(island, uv_layer)
+            isl_width = bb[2] - bb[0]
+            if isl_width < 1e-7:
+                continue
+            # Uniform scale factor derived from X axis ratio
+            scale = ref_width / isl_width
+            pivot_x, pivot_y = bb[0], bb[1]
+            for l in island:
+                u = l[uv_layer].uv.x
+                v = l[uv_layer].uv.y
+                l[uv_layer].uv.x = pivot_x + (u - pivot_x) * scale
+                l[uv_layer].uv.y = pivot_y + (v - pivot_y) * scale
+
+        bmesh.update_edit_mesh(me)
+        self.report({'INFO'}, f"Scaled {len(other_islands)} island(s) to match X width ({ref_width:.4f}).")
+        return {'FINISHED'}
+
+
+class NASH3D_OT_scale_islands_by_y(bpy.types.Operator):
+    """Uniformly scale all selected UV islands to match the Y height of the active-face island"""
+    bl_idname = "nash3d.scale_islands_by_y"
+    bl_label = "Scale Islands by Y"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.active_object and
+                context.active_object.type == 'MESH' and
+                context.active_object.mode == 'EDIT')
+
+    def execute(self, context):
+        obj = context.active_object
+        me = obj.data
+        bm = bmesh.from_edit_mesh(me)
+        uv_layer = bm.loops.layers.uv.verify()
+
+        active_face = bm.faces.active
+        if active_face is None or not active_face.select:
+            self.report({'WARNING'}, "No active face selected.")
+            return {'CANCELLED'}
+
+        active_island, other_islands = _get_uv_island_loops_for_face(bm, uv_layer, active_face)
+
+        bb_ref = _island_bbox(active_island, uv_layer)
+        ref_height = bb_ref[3] - bb_ref[1]
+
+        if ref_height < 1e-7:
+            self.report({'WARNING'}, "Active island has zero height.")
+            return {'CANCELLED'}
+
+        for island in other_islands:
+            bb = _island_bbox(island, uv_layer)
+            isl_height = bb[3] - bb[1]
+            if isl_height < 1e-7:
+                continue
+            # Uniform scale factor derived from Y axis ratio
+            scale = ref_height / isl_height
+            pivot_x, pivot_y = bb[0], bb[1]
+            for l in island:
+                u = l[uv_layer].uv.x
+                v = l[uv_layer].uv.y
+                l[uv_layer].uv.x = pivot_x + (u - pivot_x) * scale
+                l[uv_layer].uv.y = pivot_y + (v - pivot_y) * scale
+
+        bmesh.update_edit_mesh(me)
+        self.report({'INFO'}, f"Scaled {len(other_islands)} island(s) to match Y height ({ref_height:.4f}).")
+        return {'FINISHED'}
+
+
+class IMAGE_PT_oshan_uv_deforming(bpy.types.Panel):
+
+    bl_label = "Deforming Tools"
+    bl_idname = "IMAGE_PT_oshan_uv_deforming"
+    bl_space_type = 'IMAGE_EDITOR'
+    bl_region_type = 'UI'
+    bl_category = 'Oshan Tools'
+    bl_parent_id = "IMAGE_PT_oshan_uv_tools"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.area and 
+                context.area.type == 'IMAGE_EDITOR' and 
+                context.area.ui_type == 'UV')
+
+    def draw(self, context):
+        layout = self.layout
+        obj = context.active_object
+        
+        if not (obj and obj.type == 'MESH' and obj.mode == 'EDIT'):
+            return
+            
+        col = layout.column(align=True)
+        col.operator("nash3d.uv_squares", text="UV Squares", icon='GRID')
+        col.separator(factor=0.5)
+        row = col.row(align=True)
+        row.operator("nash3d.scale_islands_by_x", text="Scale by X", icon='DRIVER_DISTANCE')
+        row.operator("nash3d.scale_islands_by_y", text="Scale by Y", icon='DRIVER_DISTANCE')
 
 # =========================================================================
 # REGISTRATION
@@ -1763,12 +2860,20 @@ classes = (
     VIEW3D_PT_oshan_group_subpanel,
     VIEW3D_PT_oshan_easy_bevel_subpanel,
     VIEW3D_PT_oshan_easy_smooth_subpanel,
+    NASH3D_OT_remove_all_materials,
+    NASH3D_OT_copy_materials,
     VIEW3D_PT_oshan_vertex_paint_subpanel,
+    VIEW3D_PT_oshan_misc_tools_subpanel,
     VIEW3D_PT_oshan_about_subpanel,
     IMAGE_PT_oshan_uv_tools,
     IMAGE_PT_oshan_uv_snapping,
     IMAGE_PT_oshan_uv_rotating,
     IMAGE_PT_oshan_texel_density,
+    NASH3D_OT_explode_islands,
+    NASH3D_OT_uv_squares,
+    NASH3D_OT_scale_islands_by_x,
+    NASH3D_OT_scale_islands_by_y,
+    IMAGE_PT_oshan_uv_deforming,
     # OBJECT_OT_my_custom_operator, # Add/uncomment future operators here
 )
 
