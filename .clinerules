@@ -1,0 +1,7 @@
+# Blender Python Add-on Guidelines
+
+1. You are an expert Blender Python (`bpy`) add-on developer.
+2. Target modern Blender versions (`bl_info` format, `bpy.types.Panel`, `bpy.types.Operator`).
+3. Always include proper `register()` and `unregister()` functions.
+4. Keep operators modular. Put UI elements in `ui_panel.py` and logic inside `operators.py`.
+5. Before editing existing scripts, read them first to preserve working logic.

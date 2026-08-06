@@ -2669,130 +2669,6 @@ def _island_bbox(loops, uv_layer):
     return min(xs), min(ys), max(xs), max(ys)
 
 
-class NASH3D_OT_orient_uvs_by_world(bpy.types.Operator):
-    """Orient the selected UV islands based on the orientation of the world"""
-    bl_idname = "nash3d.orient_uvs_by_world"
-    bl_label = "Orient UVs by World"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        return (context.active_object and
-                context.active_object.type == 'MESH' and
-                context.active_object.mode == 'EDIT')
-
-    def execute(self, context):
-        import bmesh
-        import math
-        import mathutils
-
-        obj = context.active_object
-        me = obj.data
-        bm = bmesh.from_edit_mesh(me)
-        
-        uv_layer = bm.loops.layers.uv.active
-        if not uv_layer:
-            self.report({'ERROR'}, "No active UV layer found.")
-            return {'CANCELLED'}
-
-        matrix_world = obj.matrix_world
-        normal_matrix = matrix_world.inverted_safe().transposed().to_3x3()
-
-        islands = get_uv_islands(bm, uv_layer)
-        
-        processed_count = 0
-        for island in islands:
-            sel_loops = [l for l in island if (l.uv_select_vert if hasattr(l, "uv_select_vert") else l[uv_layer].select)]
-            if not sel_loops:
-                continue
-
-            sum_A = 0.0
-            sum_B = 0.0
-
-            # Precalculate island centroid to rotate around
-            u_sum = sum(l[uv_layer].uv.x for l in sel_loops)
-            v_sum = sum(l[uv_layer].uv.y for l in sel_loops)
-            cx = u_sum / len(sel_loops)
-            cy = v_sum / len(sel_loops)
-
-            # Accumulate rotation vectors for all edges in this island
-            for l in island:
-                face = l.face
-                
-                # World space normal
-                N = normal_matrix @ face.normal
-                if N.length_squared < 1e-8:
-                    continue
-                N.normalize()
-                
-                Z_world = mathutils.Vector((0, 0, 1))
-                Y_world = mathutils.Vector((0, 1, 0))
-                
-                # Calculate Up vector
-                # Use a 45 degree threshold to distinguish walls from roofs/floors
-                if abs(N.z) < 0.7071:
-                    Up = Z_world - Z_world.dot(N) * N
-                elif N.z > 0:
-                    Up = Y_world - Y_world.dot(N) * N
-                else:
-                    Up = -Y_world - (-Y_world).dot(N) * N
-                    
-                if Up.length_squared < 1e-8:
-                    continue
-                Up.normalize()
-                
-                Right = Up.cross(N)
-                Right.normalize()
-                
-                # 3D edge vector in world space
-                p1 = matrix_world @ l.vert.co
-                p2 = matrix_world @ l.link_loop_next.vert.co
-                E3 = p2 - p1
-                
-                if E3.length_squared < 1e-12:
-                    continue
-                
-                # Ideal UV direction for this edge
-                du_ideal = E3.dot(Right)
-                dv_ideal = E3.dot(Up)
-                
-                # Actual UV direction for this edge
-                uv1 = l[uv_layer].uv
-                uv2 = l.link_loop_next[uv_layer].uv
-                du_uv = uv2.x - uv1.x
-                dv_uv = uv2.y - uv1.y
-                
-                # Accumulate
-                sum_A += du_uv * du_ideal + dv_uv * dv_ideal
-                sum_B += du_uv * dv_ideal - dv_uv * du_ideal
-
-            if abs(sum_A) < 1e-8 and abs(sum_B) < 1e-8:
-                continue
-                
-            # Optimal rotation angle
-            theta = math.atan2(sum_B, sum_A)
-            cos_t = math.cos(theta)
-            sin_t = math.sin(theta)
-
-            # Rotate all UVs in the island
-            for l in island:
-                u = l[uv_layer].uv.x - cx
-                v = l[uv_layer].uv.y - cy
-                
-                l[uv_layer].uv.x = cx + u * cos_t - v * sin_t
-                l[uv_layer].uv.y = cy + u * sin_t + v * cos_t
-
-            processed_count += 1
-
-        if processed_count > 0:
-            bmesh.update_edit_mesh(me)
-            self.report({'INFO'}, f"Oriented {processed_count} island(s) by world.")
-            return {'FINISHED'}
-        else:
-            self.report({'WARNING'}, "No selected UV islands found.")
-            return {'CANCELLED'}
-
-
 class NASH3D_OT_scale_islands_by_x(bpy.types.Operator):
     """Uniformly scale all selected UV islands to match the X width of the active-face island"""
     bl_idname = "nash3d.scale_islands_by_x"
@@ -2928,7 +2804,6 @@ class IMAGE_PT_oshan_uv_deforming(bpy.types.Panel):
             
         col = layout.column(align=True)
         col.operator("nash3d.uv_squares", text="UV Squares", icon='GRID')
-        col.operator("nash3d.orient_uvs_by_world", text="Orient UVs by World", icon='ORIENTATION_GLOBAL')
         col.separator(factor=0.5)
         row = col.row(align=True)
         row.operator("nash3d.scale_islands_by_x", text="Scale by X", icon='DRIVER_DISTANCE')
@@ -3065,7 +2940,6 @@ classes = (
     IMAGE_PT_oshan_texel_density,
     NASH3D_OT_explode_islands,
     NASH3D_OT_uv_squares,
-    NASH3D_OT_orient_uvs_by_world,
     NASH3D_OT_scale_islands_by_x,
     NASH3D_OT_scale_islands_by_y,
     IMAGE_PT_oshan_uv_deforming,
