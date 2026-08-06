@@ -1,0 +1,5 @@
+# Analysis of Nasho3D_QuickPanel.py
+
+This is the current state of the `Nasho3D_QuickPanel.py` file. Please review this content to understand the existing structure and functionality of the addon.
+
+[Content of Nasho3D_QuickPanel.py]

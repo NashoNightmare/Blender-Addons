@@ -602,6 +602,121 @@ class NASH3D_OT_set_texel_density(bpy.types.Operator):
         return {'FINISHED'}
 
 # =========================================================================
+# GET TEXEL DENSITY OPERATOR
+# =========================================================================
+class NASH3D_OT_get_texel_density(bpy.types.Operator):
+    """Read the texel density of the selected UV island(s) and update the
+    Physical Size field so the TD display reflects the actual island density.
+    Uses an area-weighted method across all faces for accuracy — this is more
+    correct than a simple per-face average when faces vary in size.
+    Formula: Physical Size = Texture Size / Current TD"""
+    bl_idname = "nash3d.get_texel_density"
+    bl_label = "Get Texel Density"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.active_object and
+                context.active_object.type == 'MESH' and
+                context.active_object.mode == 'EDIT')
+
+    # ---- private helpers (shared with set_texel_density) ----------------
+
+    @staticmethod
+    def _world_face_area(face, matrix_world):
+        """Return the world-space area of a BMFace via fan triangulation."""
+        world_verts = [matrix_world @ v.co for v in face.verts]
+        area = 0.0
+        v0 = world_verts[0]
+        for i in range(1, len(world_verts) - 1):
+            cross = (world_verts[i] - v0).cross(world_verts[i + 1] - v0)
+            area += cross.length * 0.5
+        return area
+
+    @staticmethod
+    def _uv_face_area(face_loops, uv_layer):
+        """Return the UV-space area of a face using the shoelace formula."""
+        uvs = [l[uv_layer].uv for l in face_loops]
+        n = len(uvs)
+        area = 0.0
+        for i in range(n):
+            j = (i + 1) % n
+            area += uvs[i].x * uvs[j].y - uvs[j].x * uvs[i].y
+        return abs(area) * 0.5
+
+    # ---- execute --------------------------------------------------------
+
+    def execute(self, context):
+        import math
+
+        scene = context.scene
+        texture_size = int(scene.oshan_td_texture_size)  # pixels
+
+        obj = context.active_object
+        bm = bmesh.from_edit_mesh(obj.data)
+        uv_layer = bm.loops.layers.uv.active
+
+        if not uv_layer:
+            self.report({'ERROR'}, "No active UV layer found.")
+            return {'CANCELLED'}
+
+        matrix_world = obj.matrix_world
+        islands = get_uv_islands(bm, uv_layer)
+
+        # Accumulate areas across ALL selected islands for a combined result
+        total_world_area = 0.0
+        total_uv_area = 0.0
+        processed = 0
+
+        for island in islands:
+            # Only process islands that have at least one selected loop/vert
+            sel_loops = [
+                l for l in island
+                if (l.uv_select_vert if hasattr(l, "uv_select_vert") else l[uv_layer].select)
+            ]
+            if not sel_loops:
+                continue
+
+            # Group loops by face
+            face_loop_map = {}
+            for l in island:
+                fid = l.face.index
+                if fid not in face_loop_map:
+                    face_loop_map[fid] = []
+                face_loop_map[fid].append(l)
+
+            # Accumulate world and UV areas for this island
+            for loops in face_loop_map.values():
+                total_world_area += self._world_face_area(loops[0].face, matrix_world)
+                total_uv_area    += self._uv_face_area(loops, uv_layer)
+
+            processed += 1
+
+        if processed == 0:
+            self.report({'WARNING'}, "No selected UV islands found.")
+            return {'CANCELLED'}
+
+        if total_world_area < 1e-12 or total_uv_area < 1e-12:
+            self.report({'ERROR'}, "Island has zero area — cannot calculate texel density.")
+            return {'CANCELLED'}
+
+        # current_td  =  texture_size * sqrt(uv_area / world_area)  [texels/m]
+        # physical_size  =  texture_size / current_td
+        current_td = texture_size * math.sqrt(total_uv_area / total_world_area)
+        physical_size = texture_size / current_td
+
+        # Write the back-calculated Physical Size back to the scene property
+        scene.oshan_td_physical_size = physical_size
+
+        self.report(
+            {'INFO'},
+            f"Got texel density: {current_td:.2f} px/m — "
+            f"Physical Size set to {physical_size:.4f} m "
+            f"(from {processed} island(s), {texture_size}px texture)."
+        )
+        return {'FINISHED'}
+
+# =========================================================================
 # LATTICE DEFORMER OPERATOR
 # =========================================================================
 class NASH3D_OT_create_lattice(bpy.types.Operator):
@@ -1814,6 +1929,8 @@ class IMAGE_PT_oshan_texel_density(bpy.types.Panel):
         col.prop(scene, "oshan_td_texture_size", text="Texture Size")
         col.prop(scene, "oshan_td_physical_size", text="Physical Size (m)")
         
+        col.separator(factor=0.5)
+        col.operator("nash3d.get_texel_density", text="Get Texel Density", icon='EYEDROPPER')
         col.separator(factor=0.5)
         col.prop(scene, "oshan_td_scale_pivot", text="Pivot")
         op = col.operator("nash3d.set_texel_density", text="Set Texel Density", icon='UV_DATA')
@@ -3063,6 +3180,7 @@ classes = (
     IMAGE_PT_oshan_uv_snapping,
     IMAGE_PT_oshan_uv_rotating,
     IMAGE_PT_oshan_texel_density,
+    NASH3D_OT_get_texel_density,
     NASH3D_OT_explode_islands,
     NASH3D_OT_uv_squares,
     NASH3D_OT_orient_uvs_by_world,

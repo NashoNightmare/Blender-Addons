@@ -1244,7 +1244,7 @@ class NASH3D_OT_easy_smooth(bpy.types.Operator):
 # =========================================================================
 class NASH3D_OT_update_addon(bpy.types.Operator):
     """Overwrites the current addon file with the selected Python file"""
-    bl_idname = "nash3d.update_addon"
+bl_idname = "nash3d.update_addon_from_file"
     bl_label = "Apply Update"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -3155,3 +3155,5 @@ def unregister():
 
 if __name__ == "__main__":
     register()
+b l _ i d n a m e   =   ' n a s h 3 d . u p d a t e _ a d d o n _ f r o m _ f i l e ' 
+ 
